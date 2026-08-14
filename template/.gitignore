@@ -1,0 +1,9 @@
+# Your wiki holds personal documents. If you put it in git, keep the repo
+# PRIVATE -- raw/ and wiki/ are deliberately tracked so history is auditable.
+
+.obsidian/
+.DS_Store
+Thumbs.db
+
+# One-off extracts; regenerate rather than track.
+exports/

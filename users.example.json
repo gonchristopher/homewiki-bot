@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to users.json and edit. Maps Telegram numeric user IDs to who that person is. This is BOTH the whitelist and the identity map -- a Telegram user not listed here is silently ignored, and the name is what 'my'/'I'/'me' resolves to when the bot searches the wiki. Get each ID from @userinfobot on Telegram. Keys starting with _ are ignored, so this comment is safe to leave in.",
+
+  "111111111": {
+    "name": "Jane Doe",
+    "notes": "Primary wiki owner. Subscriber on the family health plan."
+  },
+  "222222222": {
+    "name": "John Doe",
+    "notes": "Spouse. Co-owner of the house."
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+.env
+users.json
+history.json
+sessions.json
+*.log
+
+# Generated from the .template versions by scripts/install-service.sh
+com.homewiki.bot.plist
+homewiki-bot.service
+
+# OS cruft
+.DS_Store
+Thumbs.db

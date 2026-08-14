@@ -1,0 +1,27 @@
+{
+  "name": "homewiki-bot",
+  "version": "1.0.0",
+  "description": "Telegram bridge to a local Claude Code session running against a personal document wiki",
+  "main": "bot.js",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "telegram",
+    "bot",
+    "claude",
+    "claude-code",
+    "wiki",
+    "personal-knowledge-base"
+  ],
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node bot.js",
+    "setup": "node setup.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^1.2.0"
+  }
+}
