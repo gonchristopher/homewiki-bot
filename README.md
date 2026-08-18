@@ -211,6 +211,7 @@ limits are constants at the top of [bot.js](bot.js):
 | `MAX_QUEUE_DEPTH` | 5 | A burst of messages queueing unbounded work |
 | `MAX_PROMPT_CHARS` | 4000 | One message becoming an enormous prompt |
 | `MAX_HISTORY` | 5 exchanges | The replayed context growing without limit |
+| `MAX_CONCURRENT_UPLOADS` | 3 | Unbounded parallel downloads filling the disk |
 
 **The offline backlog is the one that costs real money.** Telegram queues
 updates for a bot that's down and delivers all of them on reconnect, up to 24
@@ -223,9 +224,12 @@ notice per chat:
 > I was down. Ask again if it still matters. Anything you sent me to file was
 > still saved to import/.
 
-**Uploads are exempt from all of this.** They're a local file write that costs
-nothing, and a document sent last night is still worth filing this morning — so
-queued photos and PDFs still land in `import/` on reconnect.
+**Uploads are exempt from the billing guards.** They're a local file write that
+costs nothing, and a document sent last night is still worth filing this morning
+— so queued photos and PDFs still land in `import/` on reconnect. They aren't
+free, though: each is a download and a file written into the wiki, so
+`MAX_CONCURRENT_UPLOADS` caps how many can be in flight at once. The excess is
+refused with a "send it again in a moment" rather than queued.
 
 This also defuses a crash loop. An update Telegram hasn't seen confirmed is
 redelivered, so a message that reliably kills the bot would be retried by the
@@ -410,6 +414,31 @@ wiki. Verified after the fix: out-of-tree `Read`, `Glob`, `Grep` and `Bash` are
 all denied, and a spawned subagent inherits the same restrictions rather than
 escaping them.
 
+**Private chats only.** Authorization is per *sender*, but a reply goes to the
+*chat*, and those are the same thing only one-to-one. Anyone can add a bot to a
+Telegram group; if a whitelisted person then typed there, every answer — medical,
+insurance, financial — would be delivered to everyone in that group. Messages are
+therefore ignored unless `chat.type` is `private` **and** the chat ID matches the
+sender's own user ID, so an answer provably goes back to the person the wiki was
+searched as. Group messages are dropped silently, the same as an unlisted sender,
+so adding the bot to a group reveals nothing about who is on the whitelist.
+
+**Uploaded filenames are rebuilt, not accepted.** `file_name` arrives over the
+wire and is attacker-influenced. Stripping the directory part isn't enough,
+because some *names* are load-bearing wherever the file lands: Claude Code reads
+a nested `CLAUDE.md` as **instructions**. An upload called `CLAUDE.md` would have
+promoted hostile document text from "content the model reads as data" to "text in
+the model's own instructions" — the one trust boundary the permission model above
+can't defend. So the sender's name is reduced to a slug and prefixed: every
+upload lands as `upload-<slug><ext>`, which rules out `CLAUDE.md` and dotfiles by
+construction rather than by blocklist. The original name is recorded in the
+`.note.txt` beside the file.
+
+**Errors are redacted on the way to the chat.** A failure message can carry
+absolute paths, the CLI's stderr, or an API URL with the bot token in it — and
+unparsed CLI stdout is wiki content that never passed the masking rules. Errors
+carry a short vetted line for the chat; the detail goes only to the log.
+
 **Untrusted text never touches a shell.** The prompt is written to the CLI's
 stdin rather than passed as an argument, so a message can't be mangled into
 arguments.
@@ -430,8 +459,9 @@ deliberately, add its tool names to `ALLOWED_TOOLS`.
 
 **Known gaps** — worth understanding before trusting this with anything sensitive:
 
-- The Telegram whitelist is the only gate on *who* can send work. It does not
-  constrain what an injected document can attempt once processing starts.
+- The Telegram whitelist and the private-chat rule are the only gates on *who*
+  can send work. They do not constrain what an injected document can attempt
+  once processing starts.
 - Telegram is not end-to-end encrypted for bot chats. Your questions and the
   bot's answers — which may quote medical or financial details — pass through
   Telegram's servers. Instruct Claude to mask identifiers in `CLAUDE.md`
@@ -449,7 +479,8 @@ deliberately, add its tool names to `ALLOWED_TOOLS`.
 
 **Files that stay local.** `.env` (bot token), `users.json` (real names and
 Telegram IDs), `history.json` (verbatim excerpts of conversations) and the
-`*.log` files are all gitignored. Don't commit them, and don't paste log excerpts
+`*.log` files are all gitignored, and the first three are written `0600` so other
+accounts on the machine can't read them. Don't commit them, and don't paste log excerpts
 into a public issue without reading them first.
 
 ## Troubleshooting

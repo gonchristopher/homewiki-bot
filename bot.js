@@ -87,6 +87,16 @@ const MAX_QUEUE_DEPTH = 5;
 // is 4096 characters per message, so this only bites on deliberate abuse.
 const MAX_PROMPT_CHARS = 4000;
 
+// Uploads are exempt from the guards above -- they cost nothing to bill and a
+// document sent last night is still worth filing this morning -- but they are
+// not free: each one is a network download and a file written into the wiki.
+// Skipping the queue entirely means an account that has been taken over (or a
+// phone stuck in a retry loop) can start unbounded parallel downloads and fill
+// the disk. This caps how many can be in flight at once; the excess is refused
+// rather than queued, so the sender is told to resend rather than left waiting.
+const MAX_CONCURRENT_UPLOADS = 3;
+let uploadsInFlight = 0;
+
 // --- Permissions -----------------------------------------------------------
 //
 // Threat model: this bot processes documents that arrive over Telegram and
@@ -288,8 +298,10 @@ function loadHistory() {
   }
 }
 
+// Owner-only: the stored window is verbatim questions and answers about the
+// household's medical and financial records, sitting in the repo directory.
 function saveHistory(history) {
-  fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2));
+  fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), { mode: 0o600 });
 }
 
 let history = loadHistory();
@@ -387,10 +399,53 @@ function enqueue(task) {
 const staleNoticeSent = new Set();
 
 // Returns the configured person for this sender, or null if not authorized.
+//
+// The lookup MUST be an own-property check. A plain object inherits from
+// Object.prototype, so `USERS['toString']` returns a function -- truthy, and
+// with a `.name` that satisfies the shape the rest of the code expects, which
+// would authorize a sender who isn't listed. Telegram IDs are numeric so
+// nothing reaches that today, but the whitelist shouldn't depend on it.
 function identify(msg) {
   const id = String(msg.from && msg.from.id);
   if (id.startsWith('_')) return null;
+  if (!Object.hasOwn(USERS, id)) return null;
   return USERS[id] || null;
+}
+
+// Authorization is per-sender, but replies go to the *chat*. Those are the same
+// thing only in a one-to-one chat: anyone can add this bot to a group, and if a
+// whitelisted person then types there, every answer -- medical records,
+// insurance, finances -- is delivered to everyone in the group, whitelisted or
+// not. Conversation history is keyed by chat as well, so a shared chat would
+// also replay one person's exchanges into another person's prompt.
+//
+// So: private chats only. In a Telegram private chat the chat ID equals the
+// user's own ID, which is checked too -- that way the reply provably goes back
+// to the person the wiki was searched as.
+function isPrivateChat(msg) {
+  return (
+    msg.chat &&
+    msg.chat.type === 'private' &&
+    msg.from &&
+    String(msg.chat.id) === String(msg.from.id)
+  );
+}
+
+// Errors travel two places with very different audiences: the log, read by the
+// person who owns the machine, and the chat, which is a copy of the wiki's
+// contents leaving the machine. So an error carries a short line safe to send
+// (`.chatMessage`) plus the detail, which only ever reaches the log. Anything
+// without a `.chatMessage` is treated as unvetted and reported generically --
+// `err.message` from a library can carry absolute paths, stderr, or the API URL
+// with the bot token embedded in it.
+function reportable(chatMessage, detail) {
+  const err = new Error(detail ? `${chatMessage}: ${detail}` : chatMessage);
+  err.chatMessage = chatMessage;
+  return err;
+}
+
+function chatSafeMessage(err) {
+  return (err && err.chatMessage) || 'Something went wrong on my end -- check the bot log.';
 }
 
 function runClaude({ prompt, cwd, appendSystemPrompt }) {
@@ -424,7 +479,7 @@ function runClaude({ prompt, cwd, appendSystemPrompt }) {
       clearTimeout(timer);
       if (timedOut) {
         reject(
-          new Error(
+          reportable(
             `claude ran longer than ${CLAUDE_TIMEOUT_MS / 60000} minutes and was stopped. ` +
               'Try a narrower question.'
           )
@@ -432,13 +487,16 @@ function runClaude({ prompt, cwd, appendSystemPrompt }) {
         return;
       }
       if (code !== 0) {
-        reject(new Error(`claude exited with code ${code}: ${stderr || stdout}`));
+        reject(reportable(`claude exited with code ${code}`, stderr || stdout));
         return;
       }
       try {
         resolve(JSON.parse(stdout));
       } catch (err) {
-        reject(new Error(`Could not parse claude output as JSON: ${err.message}\n${stdout}`));
+        // Deliberately does NOT carry stdout into the message. Unparsed stdout
+        // is wiki content that never went through the masking rules, and the
+        // message is on its way to a chat window.
+        reject(reportable('claude produced output I could not read', `${err.message}\n${stdout}`));
       }
     });
   });
@@ -490,6 +548,9 @@ async function withProgress(chatId, ackText, action, fn) {
 bot.on('message', (msg) => {
   const user = identify(msg);
   if (!user) return; // silently ignore anyone not listed in users.json
+  // Same treatment for a group: silent, so adding the bot to one tells the
+  // person who did it nothing about who is on the whitelist.
+  if (!isPrivateChat(msg)) return;
 
   const chatId = msg.chat.id;
   const key = String(chatId);
@@ -498,6 +559,13 @@ bot.on('message', (msg) => {
   // so there's nothing to serialize and no reason to make someone wait behind
   // a long-running question.
   if (msg.document || msg.photo) {
+    if (uploadsInFlight >= MAX_CONCURRENT_UPLOADS) {
+      bot
+        .sendMessage(chatId, `⏳ I'm still saving ${uploadsInFlight} files. Send that one again in a moment.`)
+        .catch(() => {});
+      return;
+    }
+    uploadsInFlight++;
     handleFileUpload(msg, user)
       .then((name) =>
         bot.sendMessage(
@@ -507,8 +575,11 @@ bot.on('message', (msg) => {
       )
       .catch(async (err) => {
         console.error(err);
-        await bot.sendMessage(chatId, `Couldn't save that file: ${err.message}`).catch(() => {});
-      });
+        await bot
+          .sendMessage(chatId, `Couldn't save that file: ${chatSafeMessage(err)}`)
+          .catch(() => {});
+      })
+      .finally(() => uploadsInFlight--);
     return;
   }
 
@@ -643,7 +714,7 @@ bot.on('message', (msg) => {
       }
     } catch (err) {
       console.error(err);
-      await bot.sendMessage(chatId, `Error: ${err.message}`).catch(() => {});
+      await bot.sendMessage(chatId, `Error: ${chatSafeMessage(err)}`).catch(() => {});
     }
   });
 });
@@ -671,6 +742,37 @@ function sanitizeSlug(slug) {
     .replace(/^-+|-+$/g, '')
     .slice(0, 40)
     .replace(/-+$/, '');
+}
+
+// The sender-supplied file name is attacker-influenced -- the whole premise is
+// that documents arrive from insurers, labs and contractors -- so it is treated
+// as hostile, not merely as untidy.
+//
+// basename() alone is not enough. It stops `../../.claude/settings.json` from
+// escaping import/, but it happily lets the name through unchanged, and some
+// names are load bearing wherever the file lands: Claude Code reads a nested
+// CLAUDE.md as *instructions* when it works in that directory. An upload named
+// CLAUDE.md would therefore promote hostile document text from "content the
+// model reads as data" to "text in the model's own instructions" -- a trust
+// promotion the permission model above was never meant to absorb.
+//
+// So the name is rebuilt rather than accepted: the sender's stem is reduced to
+// the same lowercase-and-hyphens shape as a note slug and prefixed, which makes
+// every upload a plain `upload-*` file. That drops dotfiles and CLAUDE.md by
+// construction rather than by blocklist. The original name is kept as a note
+// beside the file so nothing is lost.
+const UPLOAD_PREFIX = 'upload-';
+
+function safeUploadName(suggestedName, fallbackExt) {
+  if (!suggestedName) return null;
+  const raw = path.basename(String(suggestedName));
+  // Keep the extension the sender gave (it's how the file gets opened later),
+  // but only if it is a plain one -- it ends up on disk.
+  const rawExt = path.extname(raw);
+  const ext = /^\.[a-zA-Z0-9]{1,10}$/.test(rawExt) ? rawExt.toLowerCase() : fallbackExt;
+  const stem = sanitizeSlug(path.basename(raw, rawExt));
+  if (!stem) return null;
+  return `${UPLOAD_PREFIX}${stem}${ext}`;
 }
 
 // Local time, in a form that sorts and that reads the same on both platforms.
@@ -729,9 +831,7 @@ async function handleFileUpload(msg, user) {
 
   const fileLink = await bot.getFileLink(fileId);
   const ext = path.extname(new URL(fileLink).pathname) || '.jpg';
-  // basename() the sender-supplied name: file_name comes off the wire and a
-  // value like "../../.claude/settings.json" would otherwise escape import/.
-  const suggested = suggestedName ? path.basename(suggestedName) : null;
+  const suggested = safeUploadName(suggestedName, ext);
   const baseName = uniqueName(suggested || `telegram-upload-${Date.now()}${ext}`);
   const destPath = path.join(IMPORT_DIR, baseName);
 
@@ -741,9 +841,15 @@ async function handleFileUpload(msg, user) {
   }
 
   // The caption is the uploader's note about the document. Keep it next to the
-  // file so the context isn't lost by the time someone processes the folder.
-  if (msg.caption) {
-    fs.writeFileSync(`${destPath}.note.txt`, `From ${user.name}: ${msg.caption}\n`);
+  // file so the context isn't lost by the time someone processes the folder --
+  // along with the name the sender gave, since safeUploadName rewrote it.
+  const lines = [];
+  if (msg.caption) lines.push(`From ${user.name}: ${msg.caption}`);
+  if (suggestedName && baseName !== suggestedName) {
+    lines.push(`Sent as: ${String(suggestedName).replace(/[\r\n]+/g, ' ').slice(0, 200)}`);
+  }
+  if (lines.length) {
+    fs.writeFileSync(`${destPath}.note.txt`, `${lines.join('\n')}\n`);
   }
 
   return baseName;

@@ -155,14 +155,21 @@ async function main() {
     [usersPath, JSON.stringify(users, null, 2) + '\n'],
   ]) {
     const rel = path.basename(file);
-    if (fs.existsSync(file) && !(await confirm(`  ${rel} already exists. Overwrite it?`, false))) {
+    const existed = fs.existsSync(file);
+    if (existed && !(await confirm(`  ${rel} already exists. Overwrite it?`, false))) {
       console.log(`  Left ${rel} alone.`);
       continue;
     }
-    fs.writeFileSync(file, body);
+    // 0600: one holds the bot token, the other the household roster. The
+    // default mode is 0644 under a typical umask, which leaves both readable by
+    // every other account on the machine. `mode` only applies when the file is
+    // created, so an existing file is chmod'd as well.
+    fs.writeFileSync(file, body, { mode: 0o600 });
+    if (existed && !isWin) fs.chmodSync(file, 0o600);
     console.log(`  Wrote ${rel}.`);
   }
-  console.log('  Both files hold secrets and personal data -- .gitignore already excludes them.');
+  console.log('  Both files hold secrets and personal data -- they are written owner-only,');
+  console.log('  and .gitignore already excludes them.');
 
   // --- Done ----------------------------------------------------------------
   heading('Done. Next:');
