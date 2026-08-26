@@ -1,0 +1,7 @@
+{
+  "_comment": "OPTIONAL. Copy to groups.json only if you want the bot to work in a Telegram group. Maps group chat IDs to a label for that group. A group not listed here is ignored exactly like an unlisted sender, and with no file at all the bot is private-chats-only. Listing a group is a decision that EVERY member of it may read anything in the wiki -- only the people in users.json can ask, but everyone present sees the answers. To find a group's ID: add the bot to the group, send it a message, and read the ID out of bot.out.log. Group IDs are negative; a supergroup's starts with -100 and CHANGES if a plain group is upgraded to one. Keys starting with _ are ignored, so this comment is safe to leave in.",
+
+  "-1001234567890": {
+    "name": "Doe Household"
+  }
+}

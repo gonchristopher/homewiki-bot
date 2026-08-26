@@ -14,13 +14,15 @@ setup — changes to it never propagate to an existing wiki.
 
 ```bash
 npm install
-npm run setup     # interactive first run: writes .env and users.json, scaffolds a wiki
+npm run setup     # interactive first run: writes .env, users.json (+ optional groups.json), scaffolds a wiki
 npm start         # node bot.js, foreground
 ```
 
 There is no test suite, no linter, and no build. Verification is manual: start
 the bot, message it from Telegram, use `/whoami`, and confirm an unlisted
-account gets no reply at all. `bot.err.log` / `bot.out.log` are where a
+account gets no reply at all. If groups are configured, also confirm that plain
+chatter in an approved group draws no reply and that an unapproved group is
+ignored. `bot.err.log` / `bot.out.log` are where a
 service-run bot reports failures.
 
 Nothing picks up code changes on its own — a running service must be restarted
@@ -46,10 +48,19 @@ Four files carry everything:
   Windows Scheduled Task, driven by `run-bot.{sh,cmd,vbs}`.
 
 Message flow in `bot.js`, in the order the `bot.on('message')` handler applies
-it: `identify()` (own-property lookup in `users.json`) → `isPrivateChat()` →
-uploads short-circuit here (they bypass every guard below, since they cost
-nothing) → message-age drop → queue-depth check → `enqueue()` → slash commands →
-`askClaude()`.
+it: `identify()` (own-property lookup in `users.json`) → `resolveChat()`
+(private chat, or a group listed in `groups.json`) → `groupAddressing()` (group
+chats only) → uploads short-circuit here (they bypass every guard below, since
+they cost nothing) → message-age drop → queue-depth check → `enqueue()` → slash
+commands → `askClaude()`.
+
+Authorization is the AND of two whitelists: **who** (`users.json`, per sender)
+and **where** (private chat always; a group only if its chat ID is in the
+optional `groups.json`). Both files are own-property lookups. Everyone else in
+an approved group reads the answers but cannot ask anything — listing a group is
+an explicit decision that its whole membership may see the wiki's contents.
+Polling does not start until `getMe()` has resolved, because group addressing is
+decided against the bot's own username and ID.
 
 Three invariants shape most of the code:
 
@@ -105,13 +116,25 @@ long form.
 - Errors reaching a chat must use `reportable()`/`chatSafeMessage()`. Raw
   `err.message` can carry absolute paths, stderr, or the API URL with the bot
   token in it; raw stdout is wiki content that never passed the masking rules.
-- Private chats only, and `chat.id` must equal `from.id`. Group messages are
-  dropped **silently**, same as an unlisted sender, so adding the bot to a group
-  reveals nothing about the whitelist.
+- In a private chat, `chat.id` must equal `from.id`. Messages from any chat that
+  isn't authorized are dropped **silently**, same as an unlisted sender, so
+  adding the bot to a group reveals nothing about either whitelist. The chat ID
+  of an unapproved group is written to the **log** (once per chat, and only for
+  a sender who is already whitelisted) because there is no other way to look one
+  up — nothing goes back to the chat.
+- In a group the bot acts only on messages addressed to it: a slash command, an
+  `@mention`, or a reply to something it said (`groupAddressing()`). This is a
+  cost control, not a nicety — every text message is a billed run, so answering
+  ordinary group chatter would spend money per line. A command aimed at another
+  bot (`/ask@otherbot`) is left alone.
+- Group history is shared and keyed by chat, so each stored turn carries a
+  `speaker` (a name from `users.json`) and the `<recent_conversation>` block is
+  labelled with it. Without that, one person's "my prescription" reads as the
+  current asker's.
 
 ## Local files
 
-`.env`, `users.json`, `history.json` and `*.log` are gitignored and hold the bot
+`.env`, `users.json`, `groups.json`, `history.json` and `*.log` are gitignored and hold the bot
 token, real names/Telegram IDs, and verbatim medical/financial conversation
-excerpts. The first three are written `0600`. Don't commit them or paste log
+excerpts. The config files are written `0600`. Don't commit them or paste log
 excerpts anywhere without reading them first.

@@ -102,8 +102,11 @@ right, [install it as a service](#keeping-it-running) so it survives a reboot.
    ```
    **Double-check these.** A wrong ID-to-name mapping means the bot answers "my
    medical records" with the wrong person's data.
-3. If your wiki folder doesn't exist yet, copy `template/` to it.
-4. `npm install && npm start`.
+3. Optional: `cp groups.example.json groups.json` and list the group chats the
+   bot may work in. Skip this and it stays private-chats-only. See
+   [Group chats](#group-chats).
+4. If your wiki folder doesn't exist yet, copy `template/` to it.
+5. `npm install && npm start`.
 
 </details>
 
@@ -146,6 +149,9 @@ household's documents.
   on your network. The bot reaches out to Telegram, not the other way around.
 - Only responds to Telegram user IDs listed in `users.json`. Everyone else is
   silently ignored.
+- **Private chats by default.** You can also approve specific group chats in
+  `groups.json`; there the bot answers only listed people, only when addressed
+  by command, `@mention` or reply — and everyone in the group sees the answer.
 - Text message → `claude -p` with `cwd` set to your wiki folder. The prompt goes
   in on stdin, never as a command-line argument.
 - **Knows who's talking.** `users.json` maps each Telegram ID to a real person,
@@ -197,6 +203,60 @@ household's documents.
 - `/whoami` — who the bot thinks you are, and how much history it's holding
 - `/new` (or `/reset`) — clear this person's conversation history
 - `/help` — the above, from your phone
+
+## Group chats
+
+By default the bot works only in one-to-one chats. If you'd rather ask it things
+from a group everyone in the household is already in, approve that group
+explicitly.
+
+**Understand the trade first.** In an approved group, *everyone who can see the
+group reads the answers* — including anything medical or financial the bot quotes
+out of the wiki. Only the people in `users.json` can ask; everyone else is a
+reader. If that isn't what you want, don't create `groups.json` and nothing
+changes.
+
+1. Add the bot to the group.
+2. Send it any message there. The bot stays silent (an unapproved group gets the
+   same silence as an unlisted stranger), but it logs the group's chat ID to the
+   console and `bot.out.log`:
+   ```
+   Ignored a message from Jane Doe in unapproved group "Doe Household"
+   (chat ID -1001234567890). To allow it, add that ID to groups.json and restart.
+   ```
+3. Copy `groups.example.json` to `groups.json` and add the ID:
+   ```json
+   {
+     "-1001234567890": { "name": "Doe Household" }
+   }
+   ```
+4. Restart the bot. It prints the approved groups at startup.
+
+**It only answers when spoken to.** Every text message is a billed Claude run, so
+the bot ignores ordinary conversation between people in the group. It acts on a
+message only when it is:
+
+- a slash command — `/ask when is the boiler service due?`, or
+  `/ask@yourbot …` if Telegram appends the bot name;
+- an `@mention` — `@yourbot when is the boiler service due?`;
+- a reply to one of the bot's own messages.
+
+Telegram's *privacy mode* is on for new bots, which means it doesn't even deliver
+plain group messages to your bot — commands and replies still arrive. If you want
+`@mentions` to work too, message @BotFather, send `/setprivacy`, pick your bot
+and choose **Disable**, then remove and re-add the bot to the group.
+
+Uploads work the same way: send the document as a reply to the bot, or put the
+`@mention` in the caption.
+
+The 5-exchange history in a group is **shared** — it's keyed by the chat, not by
+the person — so a follow-up question can refer to what someone else asked a
+moment ago. Each turn is labelled with who sent it so "my" still resolves to the
+right person. `/new` clears it for the whole group.
+
+Note that Telegram changes a group's chat ID when a plain group is upgraded to a
+supergroup. If the bot suddenly goes quiet in a group, re-read the ID from the
+log and update `groups.json`.
 
 ## Cost controls
 
@@ -351,8 +411,8 @@ Then send `/whoami` to confirm it came back up. If it doesn't answer, check
 `bot.err.log` — a bad `.env` value or a missing dependency shows up there, and
 the service will otherwise sit in a quiet restart loop.
 
-Your configuration survives a pull untouched: `.env`, `users.json` and
-`history.json` are gitignored, so they're never in a commit and can't conflict.
+Your configuration survives a pull untouched: `.env`, `users.json`,
+`groups.json` and `history.json` are gitignored, so they're never in a commit and can't conflict.
 The one thing to re-read after an update is [.env.example](.env.example) — if a
 release adds a setting, that's where it'll be documented, and your existing
 `.env` won't have it.
@@ -414,14 +474,39 @@ wiki. Verified after the fix: out-of-tree `Read`, `Glob`, `Grep` and `Bash` are
 all denied, and a spawned subagent inherits the same restrictions rather than
 escaping them.
 
-**Private chats only.** Authorization is per *sender*, but a reply goes to the
-*chat*, and those are the same thing only one-to-one. Anyone can add a bot to a
-Telegram group; if a whitelisted person then typed there, every answer — medical,
-insurance, financial — would be delivered to everyone in that group. Messages are
-therefore ignored unless `chat.type` is `private` **and** the chat ID matches the
-sender's own user ID, so an answer provably goes back to the person the wiki was
-searched as. Group messages are dropped silently, the same as an unlisted sender,
-so adding the bot to a group reveals nothing about who is on the whitelist.
+**Two whitelists: who, and where.** Authorization is per *sender*, but a reply
+goes to the *chat*, and those are the same thing only one-to-one. Anyone can add
+a bot to a Telegram group; if a whitelisted person then typed there, every answer
+— medical, insurance, financial — would be delivered to everyone in that group.
+So a chat has to be authorized in its own right, on top of the sender:
+
+- **Private chats** are always allowed, and the chat ID must match the sender's
+  own user ID, so an answer provably goes back to the person the wiki was
+  searched as.
+- **Group chats** are allowed only if the group's chat ID is listed in
+  `groups.json` — an optional file that doesn't exist by default. Inside an
+  approved group, only people in `users.json` can ask anything; everyone else is
+  a reader. **Approving a group means everyone who can see that group can read
+  anything the bot quotes from the wiki.** That is the whole point of the
+  feature, and it is the one decision to think hard about before using it.
+- Everything else — channels, and any group nobody listed — is dropped silently,
+  the same as an unlisted sender, so adding the bot to a group reveals nothing
+  about either whitelist. The unapproved group's chat ID is written to the *log*
+  once (and only for a sender who is already whitelisted), because there is no
+  other way to look one up; nothing goes back to the chat.
+
+**In a group, the bot only answers when spoken to.** Every text message is a
+billed Claude run, so acting on ordinary conversation between the people in a
+group would spend money per line. A group message is acted on only when it is a
+slash command (`/ask …`, or `/ask@yourbot …`), an `@mention` of the bot, or a
+reply to something the bot itself said. A command aimed at a different bot is
+left alone. The bot's own `@mention` is stripped before the text reaches the
+prompt or a filed note.
+
+**Group history is attributed.** The 5-exchange window is keyed by chat, so in a
+group it is shared. Each stored turn records who sent it, and the replayed
+`<recent_conversation>` block is labelled with those names — otherwise one
+person's "my prescription" would read as the next asker's.
 
 **Uploaded filenames are rebuilt, not accepted.** `file_name` arrives over the
 wire and is attacker-influenced. Stripping the directory part isn't enough,
@@ -459,9 +544,10 @@ deliberately, add its tool names to `ALLOWED_TOOLS`.
 
 **Known gaps** — worth understanding before trusting this with anything sensitive:
 
-- The Telegram whitelist and the private-chat rule are the only gates on *who*
-  can send work. They do not constrain what an injected document can attempt
-  once processing starts.
+- The Telegram user whitelist and the chat whitelist are the only gates on *who*
+  can send work, and in an approved group the *audience* for an answer is
+  everyone in that group rather than one person. Neither whitelist constrains
+  what an injected document can attempt once processing starts.
 - Telegram is not end-to-end encrypted for bot chats. Your questions and the
   bot's answers — which may quote medical or financial details — pass through
   Telegram's servers. Instruct Claude to mask identifiers in `CLAUDE.md`
@@ -478,9 +564,10 @@ deliberately, add its tool names to `ALLOWED_TOOLS`.
   bot's own `.env`.
 
 **Files that stay local.** `.env` (bot token), `users.json` (real names and
-Telegram IDs), `history.json` (verbatim excerpts of conversations) and the
-`*.log` files are all gitignored, and the first three are written `0600` so other
-accounts on the machine can't read them. Don't commit them, and don't paste log excerpts
+Telegram IDs), `groups.json` (which chats are approved), `history.json` (verbatim
+excerpts of conversations) and the `*.log` files are all gitignored, and the
+config files are written `0600` so other accounts on the machine can't read
+them. Don't commit them, and don't paste log excerpts
 into a public issue without reading them first.
 
 ## Troubleshooting
@@ -489,6 +576,7 @@ into a public issue without reading them first.
 |---|---|
 | `Could not run the Claude Code CLI` | `claude --version` must work in your terminal. If it does, the service just has a different `PATH` — set `CLAUDE_BIN` in `.env` to the full path. |
 | Bot never replies, no error | Your Telegram ID isn't in `users.json` (unlisted senders are ignored silently), or the bot isn't running. Check `bot.out.log`. |
+| Silent in a group | The group isn't in `groups.json` (its chat ID is logged to `bot.out.log`), you didn't address the bot (use a `/command`, an `@mention` or a reply), or Telegram's privacy mode is swallowing plain messages — `/setprivacy` → Disable with @BotFather, then re-add the bot. A group that became a supergroup has a **new** chat ID. |
 | `409 Conflict` in the log | Two instances are polling. Stop the service before running `npm start` by hand. |
 | `HOMEWIKI_PATH does not exist` | Path typo, or the folder is on a cloud drive that hadn't synced yet at login. The Windows task delays 30s for this. |
 | Answers are vague or say "not in the wiki" | The wiki is thin, not the bot. Ingest more documents at a keyboard and make sure `wiki/index.md` lists them. |

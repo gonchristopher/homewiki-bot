@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Interactive first-run setup: writes .env and users.json, and can scaffold a
-// starter wiki from template/. Safe to re-run -- it never overwrites an
-// existing file without asking.
+// Interactive first-run setup: writes .env, users.json and (optionally)
+// groups.json, and can scaffold a starter wiki from template/. Safe to re-run
+// -- it never overwrites an existing file without asking.
 //
 //   npm run setup
 
@@ -139,10 +139,41 @@ async function main() {
     console.log(`    Added ${name}.`);
   }
 
-  // --- 5. Write the files --------------------------------------------------
-  heading('5. Writing config');
+  // --- 5. Group chats (optional) -------------------------------------------
+  heading('5. Group chats (optional)');
+  console.log('  By default the bot only works in one-to-one chats. You can also approve');
+  console.log('  specific Telegram groups -- handy for a household group everyone is already in.');
+  console.log('  Be clear about the trade: in an approved group, ANYONE who can see the group');
+  console.log('  reads the answers, including anything medical or financial the bot quotes.');
+  console.log('  Only the people listed above can ask; everyone else is a reader.');
+  const groups = {};
+  if (await confirm('  Approve one or more group chats?', false)) {
+    console.log('  To get a group ID: add the bot to the group, send it any message, then read');
+    console.log('  the ID out of the console (or bot.out.log) -- it logs unapproved groups.');
+    console.log('  Also send /setprivacy to @BotFather and choose Disable for this bot if you');
+    console.log('  want it to see @mentions; commands and replies work either way.');
+    for (;;) {
+      const id = await ask('  Group chat ID (blank to finish)');
+      if (!id) break;
+      if (!/^-\d+$/.test(id)) {
+        console.log('  Group IDs are negative, e.g. -1001234567890. User IDs go in step 4.');
+        continue;
+      }
+      const name = await ask('    A name for that group (e.g. "Doe Household")');
+      if (!name) {
+        console.log('    A name is required -- the bot uses it when it says where it is.');
+        continue;
+      }
+      groups[id] = { name };
+      console.log(`    Approved ${name}.`);
+    }
+  }
+
+  // --- 6. Write the files --------------------------------------------------
+  heading('6. Writing config');
   const envPath = path.join(REPO, '.env');
   const usersPath = path.join(REPO, 'users.json');
+  const groupsPath = path.join(REPO, 'groups.json');
 
   const envBody =
     `# Written by \`npm run setup\`. See .env.example for what each value means.\n` +
@@ -150,10 +181,18 @@ async function main() {
     `HOMEWIKI_PATH=${wikiPath}\n` +
     `CLAUDE_BIN=${claudeBin}\n`;
 
-  for (const [file, body] of [
+  const files = [
     [envPath, envBody],
     [usersPath, JSON.stringify(users, null, 2) + '\n'],
-  ]) {
+  ];
+  // Only written when groups were actually approved: an empty groups.json and no
+  // groups.json mean the same thing, and not creating one keeps the default
+  // (private chats only) visible as an absent file.
+  if (Object.keys(groups).length) {
+    files.push([groupsPath, JSON.stringify(groups, null, 2) + '\n']);
+  }
+
+  for (const [file, body] of files) {
     const rel = path.basename(file);
     const existed = fs.existsSync(file);
     if (existed && !(await confirm(`  ${rel} already exists. Overwrite it?`, false))) {
@@ -168,7 +207,7 @@ async function main() {
     if (existed && !isWin) fs.chmodSync(file, 0o600);
     console.log(`  Wrote ${rel}.`);
   }
-  console.log('  Both files hold secrets and personal data -- they are written owner-only,');
+  console.log('  These hold secrets and personal data -- they are written owner-only,');
   console.log('  and .gitignore already excludes them.');
 
   // --- Done ----------------------------------------------------------------
@@ -176,6 +215,10 @@ async function main() {
   console.log('  1. npm start            -- run it in the foreground and check the ID-to-name list');
   console.log('  2. Message your bot on Telegram and send /whoami');
   console.log('  3. Confirm a message from an unlisted account gets no reply');
+  if (Object.keys(groups).length) {
+    console.log('  3b. In each approved group, send /whoami -- it should say which group it is in,');
+    console.log('      and plain chatter between people there should get no reply at all');
+  }
   console.log(
     `  4. Keep it running: ${
       isWin
