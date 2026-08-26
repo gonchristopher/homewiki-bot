@@ -74,6 +74,7 @@ PLIST_EOF
     cat > "$UNIT" <<UNIT_EOF
 [Unit]
 Description=homewiki-bot -- Telegram bridge to a local Claude Code session
+Wants=network-online.target
 After=network-online.target
 
 [Service]
