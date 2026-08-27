@@ -149,7 +149,7 @@ async function main() {
   const groups = {};
   if (await confirm('  Approve one or more group chats?', false)) {
     console.log('  To get a group ID: add the bot to the group, send it any message, then read');
-    console.log('  the ID out of the console (or bot.out.log) -- it logs unapproved groups.');
+    console.log('  the ID out of the console (or logs/bot.out.log) -- it logs unapproved groups.');
     console.log('  Also send /setprivacy to @BotFather and choose Disable for this bot if you');
     console.log('  want it to see @mentions; commands and replies work either way.');
     for (;;) {

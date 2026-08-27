@@ -219,7 +219,7 @@ changes.
 1. Add the bot to the group.
 2. Send it any message there. The bot stays silent (an unapproved group gets the
    same silence as an unlisted stranger), but it logs the group's chat ID to the
-   console and `bot.out.log`:
+   console and `logs/bot.out.log`:
    ```
    Ignored a message from Jane Doe in unapproved group "Doe Household"
    (chat ID -1001234567890). To allow it, add that ID to groups.json and restart.
@@ -323,7 +323,7 @@ launchctl print gui/$(id -u)/com.homewiki.bot          # macOS: status
 launchctl kickstart -k gui/$(id -u)/com.homewiki.bot   # macOS: restart
 systemctl --user status homewiki-bot                   # Linux: status
 systemctl --user restart homewiki-bot                  # Linux: restart
-tail -f bot.out.log                                    # either: what it's doing
+tail -f logs/bot.out.log                               # either: what it's doing
 ```
 
 Services start with a minimal `PATH`, which is the usual reason a service-run bot
@@ -345,7 +345,7 @@ schtasks /query /tn homewiki-bot /fo list /v   # check it
 schtasks /run   /tn homewiki-bot               # start
 schtasks /end   /tn homewiki-bot               # stop
 schtasks /delete /tn homewiki-bot /f           # remove
-Get-Content bot.out.log -Wait                  # what it's doing
+Get-Content logs\bot.out.log -Wait            # what it's doing
 ```
 
 Restart after editing `bot.js` or `.env`: `schtasks /end` then `schtasks /run`.
@@ -408,8 +408,33 @@ schtasks /end /tn homewiki-bot ; schtasks /run /tn homewiki-bot   # Windows
 ```
 
 Then send `/whoami` to confirm it came back up. If it doesn't answer, check
-`bot.err.log` — a bad `.env` value or a missing dependency shows up there, and
+`logs/bot.err.log` — a bad `.env` value or a missing dependency shows up there, and
 the service will otherwise sit in a quiet restart loop.
+
+### Logs
+
+Both launchers write to `logs/` beside the repo, and **each restart starts a
+fresh pair**. The previous `bot.out.log` / `bot.err.log` are renamed with the
+time they were rotated:
+
+```
+logs/bot.out.log                    <- the run happening now
+logs/bot.err.log
+logs/bot.out-2026-08-27-113708.log  <- the run before it
+logs/bot.err-2026-08-27-113708.log
+```
+
+So "is the new code actually running?" is answered by the top of the current
+file, not by hunting for the last restart in the middle of a file that never
+ends. The newest 15 archives of each stream are kept and older ones deleted;
+set `LOG_ARCHIVES_KEEP` to change that, or `LOG_DIR` to move the folder. One
+caveat when you're chasing a crash loop: a bot restarting every 30 seconds
+rotates that fast too, so the archive explaining the *first* crash can age out
+within minutes — raise `LOG_ARCHIVES_KEEP` before you go looking.
+
+Treat the folder as sensitive. Every question and answer passes through it, so
+the archive is a running transcript of whatever the household has asked about;
+`run-bot.sh` chmods it `0700` for that reason, and `logs/` is gitignored.
 
 Your configuration survives a pull untouched: `.env`, `users.json`,
 `groups.json` and `history.json` are gitignored, so they're never in a commit and can't conflict.
@@ -565,7 +590,7 @@ deliberately, add its tool names to `ALLOWED_TOOLS`.
 
 **Files that stay local.** `.env` (bot token), `users.json` (real names and
 Telegram IDs), `groups.json` (which chats are approved), `history.json` (verbatim
-excerpts of conversations) and the `*.log` files are all gitignored, and the
+excerpts of conversations) and everything under `logs/` are all gitignored, and the
 config files are written `0600` so other accounts on the machine can't read
 them. Don't commit them, and don't paste log excerpts
 into a public issue without reading them first.
@@ -575,8 +600,8 @@ into a public issue without reading them first.
 | Symptom | Fix |
 |---|---|
 | `Could not run the Claude Code CLI` | `claude --version` must work in your terminal. If it does, the service just has a different `PATH` — set `CLAUDE_BIN` in `.env` to the full path. |
-| Bot never replies, no error | Your Telegram ID isn't in `users.json` (unlisted senders are ignored silently), or the bot isn't running. Check `bot.out.log`. |
-| Silent in a group | The group isn't in `groups.json` (its chat ID is logged to `bot.out.log`), you didn't address the bot (use a `/command`, an `@mention` or a reply), or Telegram's privacy mode is swallowing plain messages — `/setprivacy` → Disable with @BotFather, then re-add the bot. A group that became a supergroup has a **new** chat ID. |
+| Bot never replies, no error | Your Telegram ID isn't in `users.json` (unlisted senders are ignored silently), or the bot isn't running. Check `logs/bot.out.log`. |
+| Silent in a group | The group isn't in `groups.json` (its chat ID is logged to `logs/bot.out.log`), you didn't address the bot (use a `/command`, an `@mention` or a reply), or Telegram's privacy mode is swallowing plain messages — `/setprivacy` → Disable with @BotFather, then re-add the bot. A group that became a supergroup has a **new** chat ID. |
 | `409 Conflict` in the log | Two instances are polling. Stop the service before running `npm start` by hand. |
 | `HOMEWIKI_PATH does not exist` | Path typo, or the folder is on a cloud drive that hadn't synced yet at login. The Windows task delays 30s for this. |
 | Answers are vague or say "not in the wiki" | The wiki is thin, not the bot. Ingest more documents at a keyboard and make sure `wiki/index.md` lists them. |

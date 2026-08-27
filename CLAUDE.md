@@ -22,8 +22,12 @@ There is no test suite, no linter, and no build. Verification is manual: start
 the bot, message it from Telegram, use `/whoami`, and confirm an unlisted
 account gets no reply at all. If groups are configured, also confirm that plain
 chatter in an approved group draws no reply and that an unapproved group is
-ignored. `bot.err.log` / `bot.out.log` are where a
-service-run bot reports failures.
+ignored. `logs/bot.err.log` / `logs/bot.out.log` are where a
+service-run bot reports failures. Both launchers rotate that pair aside on
+every start (`logs/bot.out-<timestamp>.log`, newest `LOG_ARCHIVES_KEEP`
+kept), so the current file always begins at the restart you just did — which
+is how you tell whether new code is live. `logs/` is gitignored and chmod
+0700: it is a verbatim transcript of every question and answer.
 
 Nothing picks up code changes on its own — a running service must be restarted
 (`launchctl kickstart -k gui/$(id -u)/com.homewiki.bot`, `systemctl --user
