@@ -55,7 +55,7 @@ PLIST_EOF
     echo "Installed $LABEL (starts at login, restarts if it dies)."
     echo "  launchctl print gui/$(id -u)/$LABEL   # status"
     echo "  launchctl kickstart -k gui/$(id -u)/$LABEL   # restart after editing bot.js or .env"
-    echo "  tail -f $REPO/bot.out.log             # follow the log"
+    echo "  tail -f $REPO/logs/bot.out.log        # follow the log"
     echo "  bash scripts/install-service.sh --uninstall"
     ;;
 
@@ -95,7 +95,7 @@ UNIT_EOF
     echo "Installed homewiki-bot.service (starts at login, restarts if it dies)."
     echo "  systemctl --user status homewiki-bot     # status"
     echo "  systemctl --user restart homewiki-bot    # restart after editing bot.js or .env"
-    echo "  tail -f $REPO/bot.out.log                # follow the log"
+    echo "  tail -f $REPO/logs/bot.out.log           # follow the log"
     echo ""
     echo "To keep it running when you're not logged in: sudo loginctl enable-linger \$USER"
     ;;

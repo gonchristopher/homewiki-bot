@@ -1,9 +1,11 @@
 node_modules/
 .env
 users.json
+groups.json
 history.json
 sessions.json
 *.log
+logs/
 
 # Generated from the .template versions by scripts/install-service.sh
 com.homewiki.bot.plist

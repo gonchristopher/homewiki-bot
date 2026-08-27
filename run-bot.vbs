@@ -6,7 +6,7 @@
 ' it as an interactive console app, so the console exists before PowerShell can
 ' hide anything, and the cmd.exe child inherits it. That left a black window on
 ' the desktop for the life of the bot -- which is not just untidy, it's a way to
-' kill the bot by accident, as a stray Ctrl-C in bot.err.log showed.
+' kill the bot by accident, as a stray Ctrl-C in logs/bot.err.log showed.
 '
 ' Run(cmd, 0, True): 0 hides the window, True waits for it. The wait is load
 ' bearing -- the task instance has to stay alive as long as the bot does, because
