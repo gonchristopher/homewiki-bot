@@ -1052,24 +1052,68 @@ process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', 
 // so polling must not start until both are known -- otherwise the first
 // messages after a restart would be judged against an empty username and
 // quietly ignored.
-bot
-  .getMe()
-  .then((me) => {
-    botId = me.id;
-    botUsername = me.username || '';
-    console.log(`Signed in as @${botUsername} (${botId}).`);
-    if (groupCount && !botUsername) {
-      console.log(
-        'WARNING: Telegram reported no username for this bot, so @mentions in a group ' +
-          'cannot be recognised. Commands and replies still work.'
+// Telegram is not reliably reachable at the moment a service manager starts
+// this process: the network may not be up yet at boot, and api.telegram.org
+// itself hands out 502s and connection timeouts often enough to see them in the
+// log. So a failure here is retried rather than fatal -- exiting on the first
+// one turns a blip into a dead bot, or into a restart loop when the network is
+// simply not ready yet.
+//
+// A rejected *token* is different: no amount of retrying fixes it, and looping
+// on it would bury the one message that explains the problem. That exits.
+const IDENTIFY_RETRY_MS = 15 * 1000;
+const IDENTIFY_MAX_ATTEMPTS = 40; // ~10 minutes, then let the supervisor restart us
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function identifySelfThenPoll() {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const me = await bot.getMe();
+      botId = me.id;
+      botUsername = me.username || '';
+      console.log(`Signed in as @${botUsername} (${botId}).`);
+      if (groupCount && !botUsername) {
+        console.log(
+          'WARNING: Telegram reported no username for this bot, so @mentions in a group ' +
+            'cannot be recognised. Commands and replies still work.'
+        );
+      }
+      await bot.startPolling();
+      return;
+    } catch (err) {
+      // Telegram's own rejection of the token, as opposed to never having
+      // reached it. 401 is a bad or revoked token; 404 is a malformed one.
+      const status = err && err.response && err.response.body && err.response.body.error_code;
+      if (status === 401 || status === 404) {
+        console.error(
+          `Telegram rejected the bot token (HTTP ${status}). Check TELEGRAM_BOT_TOKEN in .env ` +
+            '-- re-issue it with /token from @BotFather if it was revoked.'
+        );
+        process.exit(1);
+      }
+
+      // Deliberately not `err.message`: a node-telegram-bot-api failure can
+      // carry the API URL, and the bot token is a path segment in it. The code
+      // is enough to tell a timeout from a DNS failure.
+      const code = (err && (err.code || (err.cause && err.cause.code))) || 'unknown error';
+      if (attempt >= IDENTIFY_MAX_ATTEMPTS) {
+        console.error(
+          `Could not reach Telegram after ${attempt} attempts (${code}). Exiting so the ` +
+            'service manager restarts this from scratch.'
+        );
+        process.exit(1);
+      }
+      console.error(
+        `Could not reach Telegram to identify this bot (${code}), attempt ${attempt} of ` +
+          `${IDENTIFY_MAX_ATTEMPTS}. Retrying in ${IDENTIFY_RETRY_MS / 1000}s.`
       );
+      if (attempt === 1) console.error(err);
+      await sleep(IDENTIFY_RETRY_MS);
     }
-    return bot.startPolling();
-  })
-  .catch((err) => {
-    // Deliberately not `err.message`: a node-telegram-bot-api failure can carry
-    // the API URL, and the bot token is a path segment in it.
-    console.error('Could not reach Telegram to identify this bot. Check the token and network.');
-    console.error(err);
-    process.exit(1);
-  });
+  }
+}
+
+identifySelfThenPoll();
