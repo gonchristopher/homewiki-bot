@@ -24,7 +24,7 @@
     "check": "npm run lint && npm test"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
+    "dotenv": "^17.4.2",
     "node-telegram-bot-api": "^1.2.0"
   },
   "devDependencies": {
