@@ -123,6 +123,14 @@ const MAX_PROMPT_CHARS = 4000;
 const MAX_CONCURRENT_UPLOADS = 3;
 let uploadsInFlight = 0;
 
+// api.telegram.org is not reliably reachable: it drops connections mid-download
+// and hands out 5xx often enough to have swallowed real uploads, which the
+// sender only finds out about from an error and has to send again. A transient
+// failure is retried here instead. Only the network-shaped ones: a 400 ("file
+// is too big") or a 404 is an answer, and repeating it just wastes time.
+const UPLOAD_RETRY_ATTEMPTS = 4;
+const UPLOAD_RETRY_BASE_MS = 1500; // then 3s, then 6s
+
 // --- Permissions -----------------------------------------------------------
 //
 // Threat model: this bot processes documents that arrive over Telegram and
@@ -1000,6 +1008,69 @@ function saveNote(user, text, slug, group = null) {
   return baseName;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// The HTTP status behind a failure, if the call got far enough to have one.
+// downloadFile doesn't go through the API client, so a bad status arrives from
+// it as nothing but a message; that one exact string is safe to read (anything
+// else this library throws can carry the API URL, and the bot token is a path
+// segment in it).
+function telegramStatus(err) {
+  if (!err) return null;
+  const body = err.response && err.response.body;
+  if (body && body.error_code) return body.error_code;
+  if (err.response && err.response.statusCode) return err.response.statusCode;
+  const m = /^Failed to (?:download|fetch) file: HTTP (\d{3})$/.exec(err.message || '');
+  return m ? Number(m[1]) : null;
+}
+
+// Worth another go? A status means Telegram answered, and only 429 and 5xx are
+// worth repeating -- a 400 ("file is too big") or a 404 is an answer. No status
+// at all means we never got one: DNS, a timeout, a reset, a connection dropped
+// mid-body. That is the case this retry exists for.
+function isTransientTelegramError(err) {
+  const status = telegramStatus(err);
+  if (status) return status === 429 || status >= 500;
+  return true;
+}
+
+// Retry a Telegram call that failed for network-shaped reasons, backing off
+// between tries. Nothing here logs or reports err.message: it can carry the API
+// URL with the token in it. The status or the errno is enough to tell these
+// apart, and it is safe to show.
+async function withTelegramRetry(what, fn) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = telegramStatus(err);
+      const code = status
+        ? `HTTP ${status}`
+        : (err && (err.code || (err.cause && err.cause.code))) || 'no response';
+
+      const givingUp = attempt >= UPLOAD_RETRY_ATTEMPTS;
+      if (givingUp || !isTransientTelegramError(err)) {
+        console.error(`${what} failed after ${attempt} attempt(s) (${code}).`);
+        console.error(err);
+        // Only suggest a resend when the failure was the kind that might not
+        // happen again. A 400 ("file is too big") would fail the same way.
+        throw reportable(
+          `Telegram wouldn't give me that file (${code}).${givingUp ? ' Try sending it again.' : ''}`
+        );
+      }
+
+      const wait = UPLOAD_RETRY_BASE_MS * 2 ** (attempt - 1);
+      console.error(
+        `${what} failed (${code}), attempt ${attempt} of ${UPLOAD_RETRY_ATTEMPTS}. ` +
+          `Retrying in ${wait / 1000}s.`
+      );
+      await sleep(wait);
+    }
+  }
+}
+
 // Uploads are parked in import/ and nothing else happens -- no claude run, no
 // wiki edit, no commit. The human processes the folder at a keyboard later.
 // This function does the write itself with plain fs, which is why the bot needs
@@ -1018,13 +1089,28 @@ async function handleFileUpload(msg, user, { caption = '', group = null } = {}) 
     suggestedName = null;
   }
 
-  const fileLink = await bot.getFileLink(fileId);
+  const fileLink = await withTelegramRetry('Looking up an upload', () => bot.getFileLink(fileId));
   const ext = path.extname(new URL(fileLink).pathname) || '.jpg';
   const suggested = safeUploadName(suggestedName, ext);
   const baseName = uniqueName(suggested || `telegram-upload-${Date.now()}${ext}`);
   const destPath = path.join(IMPORT_DIR, baseName);
 
-  const downloadedPath = await bot.downloadFile(fileId, IMPORT_DIR);
+  // A failed download can leave a half-written file behind, under Telegram's own
+  // name for it. A retry truncates that, but a final failure would leave it
+  // sitting in import/ looking like a document someone sent, so clear it out.
+  const partialPath = path.join(IMPORT_DIR, path.basename(new URL(fileLink).pathname));
+  let downloadedPath;
+  try {
+    downloadedPath = await withTelegramRetry('Downloading an upload', () =>
+      bot.downloadFile(fileId, IMPORT_DIR)
+    );
+  } catch (err) {
+    try {
+      fs.rmSync(partialPath, { force: true });
+    } catch {}
+    throw err;
+  }
+
   if (downloadedPath !== destPath) {
     fs.renameSync(downloadedPath, destPath);
   }
