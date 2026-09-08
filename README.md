@@ -1,5 +1,7 @@
 # homewiki-bot
 
+[![CI](https://github.com/gonchristopher/homewiki-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/gonchristopher/homewiki-bot/actions/workflows/ci.yml)
+
 Ask your household's paperwork questions from your phone.
 
 homewiki-bot is a Telegram bridge to a local [Claude Code](https://claude.com/claude-code)
@@ -411,6 +413,25 @@ Then send `/whoami` to confirm it came back up. If it doesn't answer, check
 `logs/bot.err.log` — a bad `.env` value or a missing dependency shows up there, and
 the service will otherwise sit in a quiet restart loop.
 
+### Changing the code
+
+```bash
+npm run check     # eslint + node --test, the same pair CI runs
+```
+
+There is no build step. The tests are `node:test`, no framework, and they cover
+what can be checked without a Telegram token: the name and slug handling, group
+addressing, the permission config, and a set of source-level guards that fail if
+one of the constraints in [Security](#security) is relaxed — `shell: true`
+appearing in a spawn, the prompt moving from stdin into argv, a raw `err.message`
+being sent to a chat, a private file being committed. CI runs the same thing on
+Linux and Windows across Node 20, 22 and 24, plus `shellcheck`,
+`PSScriptAnalyzer` and `npm audit`.
+
+None of that talks to Telegram or to Claude, so a green CI run means the code is
+not obviously broken — not that the bot works. That still takes a message from a
+phone.
+
 ### Logs
 
 Both launchers write to `logs/` beside the repo, and **each restart starts a
@@ -463,7 +484,7 @@ assumes **the prompt itself may turn hostile** and constrains what a hijacked
 run can do.
 
 **Primary control — default-deny.** `--permission-mode dontAsk` refuses anything
-not explicitly allowed. The allowlist in `bot.js` is read-only: `Read`, `Glob`,
+not explicitly allowed. The allowlist in `lib/permissions.js` is read-only: `Read`, `Glob`,
 `Grep`, `TodoWrite`, and `ls` plus `git status`/`log`/`diff`. There is no general
 shell, so the usual injection payloads (`curl`, `node -e`, `powershell`) aren't
 available. Verified: reads succeed while `Write`, `Edit`, `rm`, `mv`,
@@ -565,7 +586,7 @@ instead; native installs are spawned directly with no shell at all.
 **MCP servers are not reachable.** Under `dontAsk`, anything not on the allowlist
 is refused, and no `mcp__*` tools are listed. Interactively authenticated servers
 (e.g. Gmail/Drive) don't come up in a headless run at all. To use one
-deliberately, add its tool names to `ALLOWED_TOOLS`.
+deliberately, add its tool names to `ALLOWED_TOOLS` in `lib/permissions.js`.
 
 **Known gaps** — worth understanding before trusting this with anything sensitive:
 
@@ -624,7 +645,7 @@ into a public issue without reading them first.
   it opened three messages ago unless the reply it gave mentioned it.
 - `claude -p` auto-loads any project-level `.mcp.json` in the wiki folder, same as
   an interactive session — but under `dontAsk` you must also add each MCP tool to
-  `ALLOWED_TOOLS` in `bot.js` (e.g. `mcp__servername__toolname`), or it's refused.
+  `ALLOWED_TOOLS` in `lib/permissions.js` (e.g. `mcp__servername__toolname`), or it's refused.
 
 ## License
 

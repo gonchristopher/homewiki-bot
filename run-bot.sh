@@ -47,6 +47,9 @@ rotate_log() {
   # Newest first; everything past the keep count goes. `|| true` because the
   # glob matching nothing is a normal state, not an error, and this runs under
   # `set -o pipefail`.
+  # These names are ours (`$stem-<timestamp>.log`), so the usual objection to
+  # parsing ls does not apply, and `ls -t` is what sorts them by age.
+  # shellcheck disable=SC2012
   old="$(ls -1t "$LOG_DIR/${stem}"-*.log 2>/dev/null | tail -n "+$((LOG_ARCHIVES_KEEP + 1))" || true)"
   if [ -n "$old" ]; then
     printf '%s\n' "$old" | while IFS= read -r f; do rm -f -- "$f"; done

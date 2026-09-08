@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Two direct dependencies, one of which holds the bot token. Weekly is often
+  # enough to keep the lockfile honest without a pull request a day.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+
+  # Pinned action versions go stale quietly; this is what notices.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

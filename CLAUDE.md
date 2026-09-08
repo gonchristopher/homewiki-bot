@@ -16,11 +16,20 @@ setup — changes to it never propagate to an existing wiki.
 npm install
 npm run setup     # interactive first run: writes .env, users.json (+ optional groups.json), scaffolds a wiki
 npm start         # node bot.js, foreground
+npm test          # node --test: the pure helpers in lib/, plus source invariants
+npm run lint      # eslint, correctness rules only -- no formatting opinions
+npm run check     # both, the same pair CI runs
 ```
 
-There is no test suite, no linter, and no build. Verification is manual: start
-the bot, message it from Telegram, use `/whoami`, and confirm an unlisted
-account gets no reply at all. If groups are configured, also confirm that plain
+There is no build step. The tests cover what can be exercised without a
+Telegram token: everything in [lib/](lib/) (name and slug handling, group
+addressing, the permission config) and a set of source-level invariants in
+[test/invariants.test.js](test/invariants.test.js) that fail if one of the
+security constraints below is relaxed. They are not a substitute for the manual
+pass, because nothing in CI ever talks to Telegram or to Claude.
+
+So the rest of verification is still manual: start the bot, message it from
+Telegram, use `/whoami`, and confirm an unlisted account gets no reply at all. If groups are configured, also confirm that plain
 chatter in an approved group draws no reply and that an unapproved group is
 ignored. `logs/bot.err.log` / `logs/bot.out.log` are where a
 service-run bot reports failures. Both launchers rotate that pair aside on
@@ -40,16 +49,27 @@ holds in memory and rewrites whole.
 
 ## Architecture
 
-Four files carry everything:
+A handful of files carry everything:
 
-- [bot.js](bot.js) — the whole bot: permission config, message dispatch, queue,
-  cost guards, note/upload writing. Read the section comments; each one records
-  a failure that motivated the code below it.
+- [bot.js](bot.js) — the bot itself: message dispatch, queue, cost guards,
+  note/upload writing. Read the section comments; each one records a failure
+  that motivated the code below it.
+- [lib/permissions.js](lib/permissions.js) — the allowlist, the deny rules and
+  the `--permission-mode dontAsk` args handed to every run. Split out of bot.js
+  only so tests can assert against it; the comments there are the reasoning.
+- [lib/text.js](lib/text.js) — the pure string handling that sits on the trust
+  boundary: `sanitizeSlug`, `safeUploadName`, `expandPath`, `stamp` and group
+  addressing. No config, no fs, no Telegram, so it is directly testable.
 - [claude-cli.js](claude-cli.js) — portable spawn of the Claude CLI, plus
   `killTree` for timeouts.
 - [setup.js](setup.js) — interactive first-run config writer.
 - [scripts/install-service.{sh,ps1}](scripts/) — launchd / systemd user unit /
   Windows Scheduled Task, driven by `run-bot.{sh,cmd,vbs}`.
+- [test/](test/) — `node:test`, no framework. New behaviour on the trust
+  boundary belongs in `lib/` so it can be covered here.
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — lint and tests on
+  Linux and Windows across Node 20/22/24, plus shellcheck, PSScriptAnalyzer, a
+  check that no private file was committed, and `npm audit`.
 
 Message flow in `bot.js`, in the order the `bot.on('message')` handler applies
 it: `identify()` (own-property lookup in `users.json`) → `resolveChat()`
@@ -96,7 +116,10 @@ an answer. `/note` and `/ask` override the classifier either way.
 ## Security constraints that must not be relaxed
 
 These were each established by a failure; the README's Security section is the
-long form.
+long form. Most of them are also asserted in
+[test/permissions.test.js](test/permissions.test.js) and
+[test/invariants.test.js](test/invariants.test.js) — if a change here makes a
+test fail, the test is reporting the relaxation, not being pedantic.
 
 - `--permission-mode dontAsk` is load-bearing. `acceptEdits` and the default
   mode auto-approve unlisted read-only shell (`whoami`, `cat` of arbitrary
