@@ -1,0 +1,13 @@
+# The repo is worked on from Windows and from Unix, and CI runs shellcheck on
+# run-bot.sh. A CRLF shebang line makes a script unrunnable in a way that is
+# very hard to see, so line endings are pinned rather than left to core.autocrlf.
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
+*.ps1 text eol=crlf
+
+*.png binary
+*.jpg binary
+*.pdf binary

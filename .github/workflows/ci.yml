@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only: nothing in this workflow needs to write to the repo, and a bot with
+# no wiki access is still a bot with a token in its logs if a job goes wrong.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The bot runs on whatever the household has -- a Mac laptop, a Linux box, a
+  # Windows machine -- and claude-cli.js takes a different code path on Windows
+  # (the .cmd shim). Both are built, both are tested.
+  test:
+    name: node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['20.12', '22.x', '24.x'] # 20.12 is the floor in package.json engines
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      # `npm ci` rather than `npm install`: it fails when package-lock.json and
+      # package.json have drifted, which is the "builds" half of this job.
+      - run: npm ci
+      - run: npm run lint
+      # Nothing but the startup path can be exercised without a real Telegram
+      # token; test/invariants.test.js checks that much (the bot must refuse to
+      # start unconfigured rather than poll Telegram with nothing), which is why
+      # no .env is written here.
+      - run: npm test
+
+  # The launchers are how the bot actually gets started on a real machine, and a
+  # syntax error in one of them only shows up as a service that never comes up.
+  shell-scripts:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck run-bot.sh scripts/install-service.sh
+      - name: bash -n
+        run: bash -n run-bot.sh scripts/install-service.sh
+
+  powershell:
+    name: powershell scripts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse and analyse
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path scripts/install-service.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          $found = Invoke-ScriptAnalyzer -Path scripts/install-service.ps1 -Severity Error
+          if ($found) { $found | Format-Table -AutoSize | Out-String | Write-Host; exit 1 }
+
+  # This repo holds a bot token, real names and Telegram IDs in files that are
+  # gitignored on purpose. A commit that adds one of them back is the failure
+  # this job exists to stop, and it is cheap enough to run on every push.
+  secrets:
+    name: no private files committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Private files must stay untracked
+        run: |
+          leaked=$(git ls-files | grep -E '^(\.env|users\.json|groups\.json|history\.json|sessions\.json)$|\.log$|^logs/' || true)
+          if [ -n "$leaked" ]; then
+            echo "These files hold private data and must not be committed:"; echo "$leaked"; exit 1
+          fi
+      - name: No bot token in tracked files
+        run: |
+          # Telegram tokens look like 1234567890:AA...(35 chars). The example
+          # files use an obvious placeholder, which is excluded.
+          if git grep -nIE '\b[0-9]{8,10}:[A-Za-z0-9_-]{35}\b' -- . ':!*.example*' ':!README.md' | grep -v '1234567890:ABC'; then
+            echo "Something that looks like a bot token is committed."; exit 1
+          fi
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+      - run: npm ci
+      # The bot holds a token and reads household documents, so a known-high
+      # advisory in a dependency is a merge blocker, not a notification.
+      - run: npm audit --audit-level=high

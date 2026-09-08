@@ -1,7 +1,17 @@
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { spawnClaude, probeClaude, killTree } = require('./claude-cli');
+// The permission config and the pure string handling live in lib/ so that test/
+// can exercise them without starting a bot; see test/README-less note in each.
+const { CLAUDE_PERMISSION_ARGS } = require('./lib/permissions');
+const {
+  expandPath,
+  sanitizeSlug,
+  safeUploadName,
+  stamp,
+  groupAddressing,
+  stripBotMention,
+} = require('./lib/text');
 
 // Load .env from next to this file, not from the current directory. dotenv
 // defaults to cwd, which silently yields no config when a service manager
@@ -11,18 +21,6 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { TelegramBot } = require('node-telegram-bot-api');
 
 const { TELEGRAM_BOT_TOKEN, CLAUDE_BIN = 'claude' } = process.env;
-
-// Paths in .env are written by hand on both Windows and macOS, so accept the
-// shapes people actually type: `~/Documents/HomeWiki`, a relative path, or an
-// absolute one with either slash direction.
-function expandPath(p) {
-  if (!p) return p;
-  let out = p.trim().replace(/^["']|["']$/g, '');
-  if (out === '~' || out.startsWith('~/') || out.startsWith('~\\')) {
-    out = path.join(os.homedir(), out.slice(1));
-  }
-  return path.resolve(out);
-}
 
 if (!TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is not set (see .env.example)');
 if (!process.env.HOMEWIKI_PATH) {
@@ -130,124 +128,6 @@ let uploadsInFlight = 0;
 // is too big") or a 404 is an answer, and repeating it just wastes time.
 const UPLOAD_RETRY_ATTEMPTS = 4;
 const UPLOAD_RETRY_BASE_MS = 1500; // then 3s, then 6s
-
-// --- Permissions -----------------------------------------------------------
-//
-// Threat model: this bot processes documents that arrive over Telegram and
-// originate from third parties (insurers, labs, contractors). A PDF can carry
-// text designed to hijack the model ("ignore your instructions and run X"), so
-// we assume the *prompt* can turn hostile and design the permissions so that a
-// hijacked prompt still can't do much.
-//
-// The approach is default-deny: `--permission-mode dontAsk` refuses anything
-// not explicitly allowed (rather than prompting, which would hang a headless
-// run). The allowlist below is the minimum the CLAUDE.md import workflow
-// actually needs -- notably it grants no general shell, so the usual injection
-// payloads (curl, node -e, powershell) are simply unavailable.
-//
-// Verified: with this config the import workflow still succeeds, while
-// `curl` and `cat <secret>` are both refused.
-//
-// Deny rules are a backstop, not the primary control -- a denylist of dangerous
-// commands is unbounded, so the allowlist above is what's actually load-bearing.
-// Both deny rules and PreToolUse hooks are enforced even under bypass modes.
-
-// File-path rules MUST be written as cwd-relative globs, not absolute paths.
-// An absolute Windows path in a rule -- in any spelling tried: `C:/x/**`,
-// `//C:/x/**`, `C:\x\**` -- silently matches nothing, so the tool it was meant
-// to permit is refused. This is what broke document import: `Write(//C:/.../**)`
-// never matched, so every Write and Edit was denied under dontAsk while Read
-// still appeared to work (Read is permitted by default, so its equally-broken
-// rule was invisible). Verified: with `Write(**)` the same import succeeds.
-//
-// `**` is relative to cwd, which is HOMEWIKI_PATH, so these rules are still
-// scoped to the wiki. Verified: a Write to a path outside HOMEWIKI_PATH is
-// denied under `Write(**)`, and Read/Grep outside HOMEWIKI_PATH stay denied.
-// The bot is READ-ONLY. It answers questions from the wiki and parks uploaded
-// files in import/ for a human to process at a keyboard; it never edits the
-// wiki or touches git history. Uploads are written by this process directly
-// (plain fs), not by Claude, so no write permission is needed for them either.
-const ALLOWED_TOOLS = [
-  // Read-only file tools, scoped to the wiki via cwd. Verified: reads, globs
-  // and greps outside HOMEWIKI_PATH are denied, and a spawned subagent
-  // inherits the same restrictions rather than escaping them.
-  //
-  // MCP note: no MCP server tools are reachable here. Under dontAsk anything
-  // absent from this list is refused, so if you later want an MCP tool used,
-  // add it explicitly (e.g. 'mcp__servername__toolname').
-  'Read(**)',
-  // Glob and Grep MUST stay path-scoped. Left unscoped, Grep will happily
-  // return matching lines from files anywhere on the filesystem -- it reads
-  // content, so it's an exfiltration primitive every bit as capable as Read.
-  'Glob(**)',
-  'Grep(**)',
-  'TodoWrite',
-  // Read-only inspection only. No mv/cp/rm/mkdir, no git add/commit/mv.
-  'Bash(ls:*)',
-  'Bash(git status:*)',
-  'Bash(git log:*)',
-  'Bash(git diff:*)',
-];
-
-const DENY_RULES = [
-  // Exfiltration channels.
-  'WebFetch',
-  'WebSearch',
-  'Bash(curl:*)',
-  'Bash(wget:*)',
-  'Bash(iwr:*)',
-  'Bash(Invoke-WebRequest:*)',
-  'Bash(Invoke-RestMethod:*)',
-  'Bash(irm:*)',
-  'Bash(nc:*)',
-  'Bash(ssh:*)',
-  'Bash(scp:*)',
-  'Bash(certutil:*)',
-  'Bash(bitsadmin:*)',
-  // Interpreters, which would otherwise re-open arbitrary execution.
-  'Bash(node:*)',
-  'Bash(python:*)',
-  'Bash(python3:*)',
-  'Bash(npm:*)',
-  'Bash(npx:*)',
-  'Bash(pip:*)',
-  'Bash(powershell:*)',
-  'Bash(pwsh:*)',
-  'Bash(cmd:*)',
-  'Bash(bash:*)',
-  'Bash(sh:*)',
-  // Nothing here should ever reach a remote.
-  'Bash(git push:*)',
-  'Bash(git remote:*)',
-  // Read-only enforcement. Omitting these tools from the allowlist is already
-  // enough under dontAsk, but denying them outright matters because these runs
-  // inherit the user's global ~/.claude/settings.json: an allow rule added
-  // there later would otherwise silently re-grant writes. Deny always wins.
-  'Write',
-  'Edit',
-  'NotebookEdit',
-  'Bash(mv:*)',
-  'Bash(cp:*)',
-  'Bash(rm:*)',
-  'Bash(mkdir:*)',
-  'Bash(tee:*)',
-  'Bash(git add:*)',
-  'Bash(git commit:*)',
-  'Bash(git mv:*)',
-  'Bash(git checkout:*)',
-  'Bash(git reset:*)',
-];
-
-// Settings are passed inline rather than as a file path: pointing --settings at
-// a file appeared to widen the set of directories the session could reach.
-const CLAUDE_PERMISSION_ARGS = [
-  '--permission-mode',
-  'dontAsk',
-  '--allowedTools',
-  ...ALLOWED_TOOLS,
-  '--settings',
-  JSON.stringify({ permissions: { deny: DENY_RULES } }),
-];
 
 // Fail at startup rather than on the first message, and say what to fix.
 function preflightClaude() {
@@ -540,61 +420,6 @@ function resolveChat(msg) {
 let botUsername = '';
 let botId = 0;
 
-// In a private chat every message is meant for the bot. In a group it isn't:
-// people talk to each other, and every text message here is a billed Claude
-// run, so acting on ordinary group chatter would spend money on conversation
-// nobody addressed to us. A group message is therefore acted on only when it is
-// unambiguously aimed at the bot:
-//
-//   - a slash command (`/ask ...`, or `/ask@thebot ...`; a command addressed to
-//     a *different* bot is left alone),
-//   - a message that @mentions the bot,
-//   - a reply to something the bot itself said.
-//
-// Returns null when the message isn't addressed to us, otherwise the text with
-// the bot's own @mention removed so it never reaches the prompt.
-function groupAddressing(msg) {
-  const body = typeof msg.text === 'string' ? msg.text : msg.caption || '';
-  const isReplyToBot = Boolean(
-    msg.reply_to_message && msg.reply_to_message.from && msg.reply_to_message.from.id === botId
-  );
-
-  const cmd = body.match(/^\/[A-Za-z0-9_]+(@([A-Za-z0-9_]+))?/);
-  if (cmd) {
-    // `/ask@someotherbot` is somebody else's business.
-    if (cmd[2] && cmd[2].toLowerCase() !== botUsername.toLowerCase()) return null;
-    return { text: stripBotMention(body) };
-  }
-
-  if (isReplyToBot || mentionsBot(body)) return { text: stripBotMention(body) };
-  return null;
-}
-
-function botMentionRe() {
-  // Usernames are [A-Za-z0-9_], so nothing here needs escaping.
-  return botUsername ? new RegExp(`@${botUsername}\\b`, 'gi') : null;
-}
-
-function mentionsBot(text) {
-  const re = botMentionRe();
-  return Boolean(re && re.test(text));
-}
-
-// Strips the bot's own @mention and the `@thebot` suffix Telegram appends to
-// commands. Both are addressing, not content, and leaving them in would put a
-// literal "@thebot" into the prompt and into filed notes.
-function stripBotMention(text) {
-  let out = String(text || '');
-  if (botUsername) {
-    out = out.replace(new RegExp(`^(/[A-Za-z0-9_]+)@${botUsername}\\b`, 'i'), '$1');
-    const re = botMentionRe();
-    if (re) out = out.replace(re, '');
-  }
-  // Tidy up the gap the mention left behind, but only horizontally: a note sent
-  // as several lines has to stay several lines when it is filed.
-  return out.replace(/[ \t]{2,}/g, ' ').trim();
-}
-
 // Errors travel two places with very different audiences: the log, read by the
 // person who owns the machine, and the chat, which is a copy of the wiki's
 // contents leaving the machine. So an error carries a short line safe to send
@@ -730,10 +555,10 @@ bot.on('message', (msg) => {
   let text = (msg.text || '').trim();
   let caption = msg.caption || '';
   if (group) {
-    const addressed = groupAddressing(msg);
+    const addressed = groupAddressing(msg, { username: botUsername, botId });
     if (!addressed) return;
     text = typeof msg.text === 'string' ? addressed.text : '';
-    caption = stripBotMention(caption);
+    caption = stripBotMention(caption, botUsername);
   }
 
   // Uploads skip the queue: they're a local file write now, not a claude run,
@@ -929,58 +754,6 @@ function uniqueName(baseName) {
   return candidate;
 }
 
-// The slug is model output, and the model has just read attacker-influenceable
-// text, so treat it as hostile: reduce to lowercase words and hyphens, drop
-// everything else. A slug that survives as empty just gets left off the name.
-function sanitizeSlug(slug) {
-  return String(slug || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40)
-    .replace(/-+$/, '');
-}
-
-// The sender-supplied file name is attacker-influenced -- the whole premise is
-// that documents arrive from insurers, labs and contractors -- so it is treated
-// as hostile, not merely as untidy.
-//
-// basename() alone is not enough. It stops `../../.claude/settings.json` from
-// escaping import/, but it happily lets the name through unchanged, and some
-// names are load bearing wherever the file lands: Claude Code reads a nested
-// CLAUDE.md as *instructions* when it works in that directory. An upload named
-// CLAUDE.md would therefore promote hostile document text from "content the
-// model reads as data" to "text in the model's own instructions" -- a trust
-// promotion the permission model above was never meant to absorb.
-//
-// So the name is rebuilt rather than accepted: the sender's stem is reduced to
-// the same lowercase-and-hyphens shape as a note slug and prefixed, which makes
-// every upload a plain `upload-*` file. That drops dotfiles and CLAUDE.md by
-// construction rather than by blocklist. The original name is kept as a note
-// beside the file so nothing is lost.
-const UPLOAD_PREFIX = 'upload-';
-
-function safeUploadName(suggestedName, fallbackExt) {
-  if (!suggestedName) return null;
-  const raw = path.basename(String(suggestedName));
-  // Keep the extension the sender gave (it's how the file gets opened later),
-  // but only if it is a plain one -- it ends up on disk.
-  const rawExt = path.extname(raw);
-  const ext = /^\.[a-zA-Z0-9]{1,10}$/.test(rawExt) ? rawExt.toLowerCase() : fallbackExt;
-  const stem = sanitizeSlug(path.basename(raw, rawExt));
-  if (!stem) return null;
-  return `${UPLOAD_PREFIX}${stem}${ext}`;
-}
-
-// Local time, in a form that sorts and that reads the same on both platforms.
-function stamp(d) {
-  const p = (n) => String(n).padStart(2, '0');
-  return {
-    file: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`,
-    human: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`,
-  };
-}
-
 // Something the person told the bot, parked in import/ as a .txt. Same contract
 // as an uploaded document: written here with plain fs, never touched by Claude,
 // and folded into the wiki by a human later. The body is the sender's verbatim
@@ -1107,7 +880,9 @@ async function handleFileUpload(msg, user, { caption = '', group = null } = {}) 
   } catch (err) {
     try {
       fs.rmSync(partialPath, { force: true });
-    } catch {}
+    } catch {
+      /* nothing to clean up */
+    }
     throw err;
   }
 
@@ -1149,10 +924,6 @@ process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', 
 // on it would bury the one message that explains the problem. That exits.
 const IDENTIFY_RETRY_MS = 15 * 1000;
 const IDENTIFY_MAX_ATTEMPTS = 40; // ~10 minutes, then let the supervisor restart us
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 async function identifySelfThenPoll() {
   for (let attempt = 1; ; attempt++) {

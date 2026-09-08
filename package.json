@@ -18,10 +18,18 @@
   },
   "scripts": {
     "start": "node bot.js",
-    "setup": "node setup.js"
+    "setup": "node setup.js",
+    "test": "node --test",
+    "lint": "eslint .",
+    "check": "npm run lint && npm test"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
     "node-telegram-bot-api": "^1.2.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^15.15.0"
   }
 }
