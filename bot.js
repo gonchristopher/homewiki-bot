@@ -4,6 +4,7 @@ const { spawnClaude, probeClaude, killTree } = require('./claude-cli');
 // The permission config and the pure string handling live in lib/ so that test/
 // can exercise them without starting a bot; see test/README-less note in each.
 const { CLAUDE_PERMISSION_ARGS } = require('./lib/permissions');
+const { diagnoseClaudeFailure } = require('./lib/claude-errors');
 const {
   expandPath,
   sanitizeSlug,
@@ -476,7 +477,13 @@ function runClaude({ prompt, cwd, appendSystemPrompt }) {
         return;
       }
       if (code !== 0) {
-        reject(reportable(`claude exited with code ${code}`, stderr || stdout));
+        reject(
+          reportable(
+            diagnoseClaudeFailure(stdout, stderr) ||
+              `claude exited with code ${code} -- check the bot log.`,
+            stderr || stdout
+          )
+        );
         return;
       }
       try {

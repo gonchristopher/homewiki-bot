@@ -60,6 +60,9 @@ A handful of files carry everything:
 - [lib/text.js](lib/text.js) — the pure string handling that sits on the trust
   boundary: `sanitizeSlug`, `safeUploadName`, `expandPath`, `stamp` and group
   addressing. No config, no fs, no Telegram, so it is directly testable.
+- [lib/claude-errors.js](lib/claude-errors.js) — maps a failed run (not logged
+  in, usage limit, out of credit, API down) to a fixed chat-safe line; nothing
+  from the run is echoed.
 - [claude-cli.js](claude-cli.js) — portable spawn of the Claude CLI, plus
   `killTree` for timeouts.
 - [setup.js](setup.js) — interactive first-run config writer.
